@@ -1,12 +1,10 @@
 {
   "ExpandedNodes": [
     "",
+    "\\lib",
     "\\lib\\kernel",
-    "\\lib\\user",
-    "\\tests",
-    "\\tests\\threads",
     "\\userprog"
   ],
-  "SelectedNode": "\\tests\\threads\\mlfqs-fair.c",
+  "SelectedNode": "\\lib\\kernel\\hash.c",
   "PreviewInSolutionExplorer": false
 }

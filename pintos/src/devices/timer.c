@@ -30,6 +30,9 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
+/*** blocked thread list ***/
+static struct list blocked_list;
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
@@ -37,6 +40,8 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+
+  list_init(&blocked_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -92,8 +97,18 @@ timer_sleep (int64_t ticks)
   int64_t start = timer_ticks ();
 
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+  //while (timer_elapsed (start) < ticks) 
+  //  thread_yield ();
+  enum intr_level prev_intr;
+  struct thread *cur = thread_current();
+  
+  if (timer_elapsed (start) < ticks) {
+    prev_intr = intr_disable();
+    cur->timer = start + ticks;
+    list_push_back(&blocked_list, &cur->elem);
+    thread_block();
+    intr_set_level(prev_intr);
+  }
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -172,6 +187,38 @@ timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
+
+  /*** check for the wake up ***/
+  struct list_elem *e; 
+  struct thread *t;
+  for (e=list_begin(&blocked_list); e!=list_end(&blocked_list);) {
+	t = list_entry(e, struct thread, elem);
+	if (t->timer <= ticks) {
+		e = list_remove(e);
+		thread_unblock(t);
+		/*** if necessary, put it in the ready queue ***/
+	}
+	else e = list_next(e);
+  }
+/*
+  if (thread_prior_aging || thread_mlfqs) {
+	thread_current()->recent_cpu += (1*FRACTION);
+	// when the system tick counter reaches a multiple of a second
+	if (timer_ticks() % TIMER_FREQ == 0) {
+		// update load_avg and recent_cpu
+		update_load_avg();
+		for (e=list_begin(&all_list); e!=list_end(&all_list); e=list_next(e)) {
+			t = list_entry(e, struct thread, elem);
+			update_recent_cpu(t);
+			// update priority every 4 seconds
+			if (timer_ticks() % 4 == 0) {
+				update_priority(t);
+			}
+		}
+	}
+  }
+  */
+  
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer

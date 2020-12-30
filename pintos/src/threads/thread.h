@@ -7,6 +7,11 @@
 
 #include "threads/synch.h"
 
+#ifndef USERPROG
+/* Project #3. */
+extern bool thread_prior_aging;
+#endif
+
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -27,6 +32,7 @@ typedef int tid_t;
 #define PRI_MAX 63                      /* Highest priority. */
 
 #define MAX_FD 128 + 2					/* MAX + STDIN + STDOUT */
+
 /* A kernel thread or user process.
 
    Each thread structure is stored in its own 4 kB page.  The
@@ -99,6 +105,7 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+#endif
 	
 	/*** structure for parent and child ***/
 	struct thread *parent;
@@ -112,7 +119,11 @@ struct thread
 	struct file *fd[MAX_FD];			   
 	/*** currently running file ***/
 	struct file *running;
-#endif
+	/*** wake up time ***/
+	int64_t timer;
+	
+	int nice;
+	int recent_cpu;
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
@@ -154,4 +165,11 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
+void priority_preemption (int);
+void thread_aging(void);
+bool priority_comp(const struct list_elem *e1, const struct list_elem *e2, void *aux);
+struct list_elem * get_highest_pri(struct list *);
+void update_load_avg(void);
+void update_recent_cpu(struct thread *, void *);
+void update_priority(struct thread *, void *);
 #endif /* threads/thread.h */
