@@ -1,11 +1,12 @@
 {
   "ExpandedNodes": [
     "",
-    "\\filesys",
+    "\\lib\\kernel",
+    "\\lib\\user",
     "\\tests",
-    "\\tests\\filesys",
-    "\\tests\\filesys\\base"
+    "\\tests\\threads",
+    "\\userprog"
   ],
-  "SelectedNode": "\\tests",
+  "SelectedNode": "\\tests\\threads\\mlfqs-fair.c",
   "PreviewInSolutionExplorer": false
 }

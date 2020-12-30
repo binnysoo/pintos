@@ -174,7 +174,6 @@ thread_create (const char *name, int priority,
 
   ASSERT (function != NULL);
 
-
   /* Allocate thread. */
   t = palloc_get_page (PAL_ZERO);
   if (t == NULL)
@@ -204,13 +203,18 @@ thread_create (const char *name, int priority,
   // initialize semaphore value to LOCK(0)
   sema_init(&(t->s), 0);
   sema_init(&(t->s_mem), 0);
+  sema_init(&(t->s_load), 0);
   // push the child element of the current thread(t->child_elem)
   //	to the child list of the currently running thread,
   //	which is the parent of the current runnig thread.
   list_push_back(&(thread_current()->children), &(t->child_elem));
-  //printf("----- THREAD <%s> ADOPTED TO THREAD <%s>\n", t->name, t->parent->name);
   // set default exit_status
-  t->exit_status = -1;
+  //t->exit_status = 0;
+  
+  // initialize fd
+  for (int i = 0;i<MAX_FD;i++)
+	  t->fd[i] = NULL;
+  t->running = NULL;
   
   /* Add to run queue. */
   thread_unblock (t);

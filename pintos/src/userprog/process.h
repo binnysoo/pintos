@@ -8,4 +8,8 @@ int process_wait (tid_t);
 void process_exit (void);
 void process_activate (void);
 
+int fake_addr(char **, int);
+void stack_push(char **, void **);
+
+
 #endif /* userprog/process.h */

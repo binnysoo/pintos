@@ -3,7 +3,6 @@
 #include <inttypes.h>
 #include <round.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
@@ -17,6 +16,8 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
+#include "userprog/syscall.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -50,45 +51,22 @@ process_execute (const char *file_name)
 	  return -1;
   }
   /* Create a new thread to execute FILE_NAME. */
-  /*** CHANGED file_name -> t_name) ***/
-  tid = thread_create (t_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (t_name, PRI_DEFAULT, start_process, fn_copy); 
+   
+  struct list_elem *e;
+  struct thread *t;
+  for (e=list_begin(&thread_current()->children); e!=list_end(&(thread_current()->children)); e=list_next(e)) {
+	t = list_entry(e, struct thread, child_elem);
+	if (t->tid == tid) {
+		sema_down(&(t->s_load));
+		break;
+	}
+  }
 
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
 
   return tid;
-}
-
-/*** argument parsing ***/
-void arg_parser(const char *file_name, char **args) {
-	int i, cnt = 0, total_cnt = 0;
-	/* allocate memory */
-	args = (char**)malloc(sizeof(char*));
-	for(i=0; i < strlen(file_name) + 1; i++) {
-		if (cnt != 0 && (file_name[i] == '\0' | file_name[i] == ' ')) {
-			total_cnt++;
-			/* reallocate if memory is already allocaed to args */
-			if (total_cnt > 1) 
-				args = (char**)realloc(args, sizeof(char*)*total_cnt);
-			/* allocate memory to save parsed argument */
-			args[total_cnt-1] = (char*)malloc(sizeof(char)*(cnt+1));
-			strlcpy(args[total_cnt-1], &file_name[i-cnt], (cnt+1));
-			cnt = 0;
-		}
-		else cnt++;
-	}
-	args = (char**)realloc(args, sizeof(char*)*(total_cnt + 1));
-	args[total_cnt] = NULL;
-}
-
-/*** free parsed ***/
-void arg_free(char **parsed) {
-	printf("free start!!\n");
-	for (int i=0; i<strlen(parsed); i++) { 
-		free(parsed[i]);
-		printf("%dth freed!\n", i);
-	}
-	free(parsed);
 }
 
 /* A thread function that loads a user process and starts it
@@ -106,12 +84,17 @@ start_process (void *file_name_)
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
-  
+
+  sema_up(&thread_current()->s_load);
+
   /* If load failed, quit. */
   palloc_free_page (file_name);
-
-  if (!success) 
-    thread_exit ();
+  
+  if (!success) {
+	  thread_exit ();
+	  //exit(-1);
+  }
+  
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -147,23 +130,20 @@ process_wait (tid_t child_tid)
 	// check for the child
 	for (e=list_begin(&(t->children)); e!=list_end(&(t->children)); e=list_next(e)) {
 		child_t = list_entry(e, struct thread, child_elem);
-		//printf("----- ITERATING to find %d, now %d\n", child_tid, child_t->tid);
 		if (child_tid == child_t->tid) {
-			//printf("----- I FOUND MY CHILD !\n");
 			// if the terminated thread was the child of the current t,
 			//		change the semaphore value to 0 (lock) to execute t
 			sema_down(&(child_t->s));
 			exit_status = child_t->exit_status;
+			sema_up(&(child_t->s_mem));
+			
 			// remove the child thread (child_t) from the children
 			list_remove(&(child_t->child_elem));
-			sema_up(&(child_t->s_mem));
-			// return the child thread's  exit status;
+			// return the child thread's exit status;
 			return exit_status;
 		}
 	}
 	// check if process_wait() has already been called
-	//printf("----- I DIDN'T FOUND MY CHILD !\n");
-	
 	return -1;
 }
 
@@ -173,6 +153,13 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  /*** close all files ***/
+  for (int i=3;i<MAX_FD;i++) {
+  	  if (get_file(i) != NULL)  
+	  	  file_close(get_file(i));
+  }
+
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pagedir;
@@ -191,6 +178,7 @@ process_exit (void)
     }
   sema_up (&(cur->s));
   sema_down (&(cur->s_mem));
+
 }
 
 /* Sets up the CPU for running user code in the current
@@ -344,7 +332,6 @@ load (const char *file_name, void (**eip) (void), void **esp)
   int i;
 
   /*** parse argument ***/
-  //arg_parser(file_name, parsed);
   char fn_copy[512];
   char **parsed;
   char *token, *save;
@@ -376,13 +363,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
   process_activate ();
 
   /* Open executable file. */
-  /*** CHANGED 'file_name' to 'parsed[0]' ***/
   file = filesys_open (parsed[0]);
   if (file == NULL) 
     {
-      printf ("load: %s: open failed\n", parsed[0]);
+	  printf ("load: %s: open failed\n", parsed[0]);
       goto done; 
     }
+  
+  thread_current()->running = file;
+  file_deny_write(file);
+
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
       || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
@@ -461,8 +451,8 @@ load (const char *file_name, void (**eip) (void), void **esp)
   /*** put arguments in stack ***/
   stack_push(parsed, esp); 
   
-  // TODO free "parsed"
-  //arg_free(parsed);
+  // free "parsed"
+  free(parsed);
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;

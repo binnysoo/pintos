@@ -5,10 +5,14 @@
 #include "threads/thread.h"
 
 #include "devices/shutdown.h"
+#include "devices/input.h"
 #include "filesys/filesys.h"
 #include "threads/vaddr.h"
 #include <string.h>
-
+#include "filesys/file.h"
+#include "threads/synch.h"
+#include "userprog/pagedir.h"
+#include "userprog/process.h"
 
 static void syscall_handler (struct intr_frame *);
 
@@ -16,10 +20,18 @@ void
 syscall_init (void) 
 {
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
+  sema_init(&mutex, 1);
+  sema_init(&wrt, 1);
+  readcount = 0;
+  lock_init(&filesys_lock);
 }
 
 void * argv_by_index(void *esp, int i) {
 	return (void *)(esp + 4 + i * 4);
+}
+
+struct file * get_file(int fd) {
+	return thread_current()->fd[fd];
 }
 
 static void
@@ -41,7 +53,7 @@ syscall_handler (struct intr_frame *f)
 	  exit(-1);
   }
   else {
-		/*** system call numbers defined in <syscall-nr.h> ***/
+	  /*** system call numbers defined in <syscall-nr.h> ***/
 	  switch(syscall_num) {
 		/*** project 2 ***/
 		case SYS_HALT: // 0
@@ -57,28 +69,37 @@ syscall_handler (struct intr_frame *f)
 			f->eax = wait(*(pid_t *)argv_by_index(tmp_esp, 0));
 			break;
 		case SYS_CREATE: // 4
+			f->eax = create(*(const char **)argv_by_index(tmp_esp, 0), 
+							*(unsigned *)argv_by_index(tmp_esp, 1));
 			break;
 		case SYS_REMOVE: // 5
+			f->eax = remove(*(const char **)argv_by_index(tmp_esp, 0));
 			break;
 		case SYS_OPEN: // 6
+			f->eax = open(*(const char **)argv_by_index(tmp_esp, 0));
 			break;
 		case SYS_FILESIZE: // 7
+			f->eax = filesize((int)*(uint32_t *)argv_by_index(tmp_esp, 0));
 			break;
 		case SYS_READ: // 8
 			f->eax = read(*(int *)argv_by_index(tmp_esp, 0),
-						  *(uint32_t *)argv_by_index(tmp_esp, 1), 
+						  (void*)*(uint32_t *)argv_by_index(tmp_esp, 1), 
 			         	  *(size_t *)argv_by_index(tmp_esp, 2));
 			break;
 		case SYS_WRITE: // 9
 			f->eax = write(*(int *)argv_by_index(tmp_esp, 0),
-						   *(uint32_t *)argv_by_index(tmp_esp, 1), 
+						   (void*)*(uint32_t *)argv_by_index(tmp_esp, 1), 
 			         	   *(size_t *)argv_by_index(tmp_esp, 2));
 			break;
 		case SYS_SEEK: // 10
+			seek((int)*(uint32_t *)argv_by_index(tmp_esp, 0),
+				 *(unsigned *)argv_by_index(tmp_esp, 1));
 			break;
 		case SYS_TELL: // 11
+			f->eax = tell((int)*(uint32_t *)argv_by_index(tmp_esp, 0));
 			break;
 		case SYS_CLOSE: // 12
+			close((int)*(uint32_t *)argv_by_index(tmp_esp, 0));
 			break;
 		case SYS_FIBONACCI: //13
 			f->eax = fibonacci(*(int *)argv_by_index(tmp_esp, 0));
@@ -123,6 +144,18 @@ bool check_argv (void *addr, int argc) {
 	return true;
 }
 
+/*** check if file name is valid 
+	 file name is not valid if:
+	 1) null
+	 2) longer than 14 
+     3) same file name exists ***/
+bool check_file (const char *file) {
+	if (file == NULL) {
+		return false;
+	}
+	return true;
+}
+
 /*** system call functions 
      these are different from those defined in /lib/user/syscall.c .
      actual functions for each case are defined here 
@@ -154,7 +187,19 @@ void exit (int status) {
 /*** exec function
      runs the executable whose name is given in "cmd_line" ***/
 pid_t exec (const char *cmd_line) {
-	return process_execute(cmd_line);
+	int tid = process_execute(cmd_line);
+/*	
+	struct list_elem *e;
+	struct thread *t;
+	for (e=list_begin(&(thread_current()->children)); e!=list_end(&(thread_current()->children)); e=list_next(e)) {
+		t = list_entry(e, struct thread, child_elem);
+		if (t->tid == tid) {
+			sema_down(&(t->s_load));
+			break;
+		}
+	}
+*/
+	return tid; 
 }
 
 int wait (pid_t pid) {
@@ -164,15 +209,38 @@ int wait (pid_t pid) {
 /*** read function ***/
 int read (int fd, void *buffer, unsigned size) {
 	int i = 0;
+	// STDIN
+	if (!check_address(buffer)) {
+		exit(-1);
+	}
+	//lock_acquire(&filesys_lock);
 	if (fd == 0) {
 		while(*(char *)(buffer + i) != '\0' 
 				&& *(char *)(buffer + i) != '\n'
-				&& i < size) {
+				&& i < (int)size) {
 			*(char*)(buffer + (i++)) = input_getc();
 		}
-		return i;
+		i = size;
 	}
-	return -1;
+	else if (fd > 2) {
+		if (get_file(fd) == NULL || !check_address(buffer)) {
+			exit(-1);
+			i = -1;
+		}
+		else {
+			sema_down(&mutex);
+			readcount++;
+			if (readcount == 1) sema_down(&wrt);
+			sema_up(&mutex);
+			i = (int)file_read(get_file(fd), buffer, (off_t)size);
+			sema_down(&mutex);
+			readcount--;
+			if (readcount ==0) sema_up(&wrt);
+			sema_up(&mutex);
+		}
+	}
+	//lock_release(&filesys_lock);
+	return i;
 }
 
 /*** write function (e.g. "echo x")
@@ -182,15 +250,25 @@ int write (int fd, const void *buffer, unsigned size) {
 	// TODO check EOF
 	/*** if end of file, stop writing 
 	     returns 0 if already EOF and couldn't be written at all ***/
-
+	//lock_acquire(&filesys_lock);
+	sema_down(&wrt);
 	/*** if fd == 1, write to the console ***/
+	// STDOUT
 	if (fd == 1) {
 		/*** putbuf(const char *buffer, size_t n)
 		     : writes "n" characters from "buffer" to the console
 			 : defined in lib/kernel/console.c ***/
 		putbuf((char *)buffer, (size_t)size);
 	}
-
+	else if (fd > 2) {
+		if (get_file(fd) == NULL || !check_address((void *)buffer)) {
+			exit(-1);
+			return -1;
+		}
+		size = file_write(get_file(fd), buffer, size);
+	}
+	sema_up(&wrt);
+	//lock_release(&filesys_lock);
 	return size;
 }
 
@@ -214,4 +292,100 @@ int max_of_four_int (int a, int b, int c, int d) {
 	if (max < c) max = c;
 	if (max < d) max = d;
 	return max;
+}
+
+/*** create function
+	 : creates file "file" sized "initial_size"
+	 : only creates, does not open ***/
+bool create (const char *file, unsigned initial_size) {
+	if (!check_file(file)) {
+		exit(-1);
+	}
+	return filesys_create(file, (off_t)initial_size);
+}
+
+/*** remove function
+	 : deletes "file" regardless of whether it is open or closed 
+	 : only removes, does not close ***/ 
+bool remove (const char *file) {
+	if (!check_file(file)) {
+		exit(-1);
+	}
+	return filesys_remove(file);
+}
+
+/*** open function 
+	 : returns fd of the opened file, -1 if failed to open ***/
+int open (const char *file) {
+	struct file *fp;
+	if (!check_file(file)) {
+		exit(-1);
+	}
+	//lock_acquire(&filesys_lock);
+	sema_down(&mutex);
+	readcount++;
+	if (readcount == 1) sema_down(&wrt);
+	sema_up(&mutex);
+
+	fp = filesys_open(file);
+	if (fp == NULL) {
+		//lock_release(&filesys_lock);
+		sema_down(&mutex);
+		readcount--;
+		if (readcount == 0) sema_up(&wrt);
+		sema_up(&mutex);
+		return -1;
+	}
+	else if (!strcmp(thread_current()->name, file)) {
+		file_deny_write(fp);
+	}
+	// fd initialized to NULL
+	for (int i=3;i<MAX_FD;i++) {
+		// find empty fd space
+		if (get_file(i) == NULL) {
+			thread_current()->fd[i] = fp;
+			//lock_release(&filesys_lock);
+			sema_down(&mutex);
+			readcount--;
+			if (readcount == 0) sema_up(&wrt);
+			sema_up(&mutex);
+			return i;
+		}
+	}
+	//lock_release(&filesys_lock);
+	sema_down(&mutex);
+	readcount--;
+	if (readcount == 0) sema_up(&wrt);
+	sema_up(&mutex);
+	return -1;
+}
+
+/*** filesize function
+	 : returns the size of the file "fd"  ***/
+int filesize (int fd) {
+	return file_length(get_file(fd));
+}
+
+/*** seek function
+	 : Changes the next byte to be read/write in "fd" to "position" 
+	 : position can past the current eof ***/
+void seek (int fd, unsigned position) {
+	return file_seek(get_file(fd), (off_t)position);
+}
+
+/*** tell function
+	 : returns the position of the next byte to be read/write in "fd"
+	 : expressed in bytes ***/
+unsigned tell (int fd) {
+	return file_tell(get_file(fd));
+}
+
+/*** close function 
+     : ***/
+void close (int fd) {
+	// already closed
+	if (get_file(fd) == NULL)
+		exit(-1);
+	file_close(get_file(fd));
+	thread_current()->fd[fd] = NULL;
 }
