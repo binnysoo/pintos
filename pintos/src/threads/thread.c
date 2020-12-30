@@ -174,6 +174,7 @@ thread_create (const char *name, int priority,
 
   ASSERT (function != NULL);
 
+
   /* Allocate thread. */
   t = palloc_get_page (PAL_ZERO);
   if (t == NULL)
@@ -198,6 +199,19 @@ thread_create (const char *name, int priority,
   sf->eip = switch_entry;
   sf->ebp = 0;
 
+  // save parent
+  t->parent = thread_current();
+  // initialize semaphore value to LOCK(0)
+  sema_init(&(t->s), 0);
+  sema_init(&(t->s_mem), 0);
+  // push the child element of the current thread(t->child_elem)
+  //	to the child list of the currently running thread,
+  //	which is the parent of the current runnig thread.
+  list_push_back(&(thread_current()->children), &(t->child_elem));
+  //printf("----- THREAD <%s> ADOPTED TO THREAD <%s>\n", t->name, t->parent->name);
+  // set default exit_status
+  t->exit_status = -1;
+  
   /* Add to run queue. */
   thread_unblock (t);
 
@@ -467,6 +481,9 @@ init_thread (struct thread *t, const char *name, int priority)
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
   intr_set_level (old_level);
+
+  // initialize list children
+  list_init(&(t->children));
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and

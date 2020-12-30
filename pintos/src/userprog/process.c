@@ -37,12 +37,58 @@ process_execute (const char *file_name)
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
-
+ 
+  /*** make thread name ***/
+  char t_name[512]; 
+  int i = 0;
+  while(fn_copy[i] != ' ' && fn_copy[i] != '\0') {
+	t_name[i] = fn_copy[i];
+	i++;
+  }
+  t_name[i] = '\0';
+  if (filesys_open(t_name) == NULL) {
+	  return -1;
+  }
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  /*** CHANGED file_name -> t_name) ***/
+  tid = thread_create (t_name, PRI_DEFAULT, start_process, fn_copy);
+
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+
   return tid;
+}
+
+/*** argument parsing ***/
+void arg_parser(const char *file_name, char **args) {
+	int i, cnt = 0, total_cnt = 0;
+	/* allocate memory */
+	args = (char**)malloc(sizeof(char*));
+	for(i=0; i < strlen(file_name) + 1; i++) {
+		if (cnt != 0 && (file_name[i] == '\0' | file_name[i] == ' ')) {
+			total_cnt++;
+			/* reallocate if memory is already allocaed to args */
+			if (total_cnt > 1) 
+				args = (char**)realloc(args, sizeof(char*)*total_cnt);
+			/* allocate memory to save parsed argument */
+			args[total_cnt-1] = (char*)malloc(sizeof(char)*(cnt+1));
+			strlcpy(args[total_cnt-1], &file_name[i-cnt], (cnt+1));
+			cnt = 0;
+		}
+		else cnt++;
+	}
+	args = (char**)realloc(args, sizeof(char*)*(total_cnt + 1));
+	args[total_cnt] = NULL;
+}
+
+/*** free parsed ***/
+void arg_free(char **parsed) {
+	printf("free start!!\n");
+	for (int i=0; i<strlen(parsed); i++) { 
+		free(parsed[i]);
+		printf("%dth freed!\n", i);
+	}
+	free(parsed);
 }
 
 /* A thread function that loads a user process and starts it
@@ -60,12 +106,12 @@ start_process (void *file_name_)
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
-
+  
   /* If load failed, quit. */
   palloc_free_page (file_name);
+
   if (!success) 
     thread_exit ();
-
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -86,9 +132,39 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid) 
 {
-  return -1;
+	int exit_status;
+	// tmp value
+	struct list_elem *e;
+	// parent thread
+	struct thread *t = thread_current();
+	// matching child thread
+	struct thread *child_t = NULL;
+
+	// check if terminated by the kernel
+
+	// check for the child
+	for (e=list_begin(&(t->children)); e!=list_end(&(t->children)); e=list_next(e)) {
+		child_t = list_entry(e, struct thread, child_elem);
+		//printf("----- ITERATING to find %d, now %d\n", child_tid, child_t->tid);
+		if (child_tid == child_t->tid) {
+			//printf("----- I FOUND MY CHILD !\n");
+			// if the terminated thread was the child of the current t,
+			//		change the semaphore value to 0 (lock) to execute t
+			sema_down(&(child_t->s));
+			exit_status = child_t->exit_status;
+			// remove the child thread (child_t) from the children
+			list_remove(&(child_t->child_elem));
+			sema_up(&(child_t->s_mem));
+			// return the child thread's  exit status;
+			return exit_status;
+		}
+	}
+	// check if process_wait() has already been called
+	//printf("----- I DIDN'T FOUND MY CHILD !\n");
+	
+	return -1;
 }
 
 /* Free the current process's resources. */
@@ -97,7 +173,6 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
-
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pagedir;
@@ -114,6 +189,8 @@ process_exit (void)
       pagedir_activate (NULL);
       pagedir_destroy (pd);
     }
+  sema_up (&(cur->s));
+  sema_down (&(cur->s_mem));
 }
 
 /* Sets up the CPU for running user code in the current
@@ -201,6 +278,57 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
                           bool writable);
 
+
+/*** calculate number of fake address needed ***/
+int fake_addr(char **parsed, int argc) {
+	int i;
+	int total = 0;
+	for (i=0; i<argc; i++) {
+		/* add the length of the arguement including '\0' */
+		total += (strlen(parsed[i]) + 1);
+	}
+
+	return (total % 4 ? (4 - total % 4) : 0);
+}
+
+/*** put arguments in stack 
+	 - parsed: double pointer pointing to set of arguments 
+     - esp: stack pointer ***/
+void stack_push(char **parsed, void **esp) {
+	int argc = strlen(parsed) / sizeof(char*);
+	int i;
+	/* push the arguments */
+	for (i=argc-1; i>=0; i--) {
+		*esp -= (strlen(parsed[i]) + 1);
+		/* push argument to the stack including '\0' */
+		strlcpy(*esp, parsed[i], strlen(parsed[i]) + 1);
+		parsed[i] = *esp;
+	}
+	/* push fake address */
+	// *esp -= fake_addr(parsed, argc);
+	for (int i=0; i<fake_addr(parsed, argc); i++) {
+		*esp -= 1;
+		**(char **)(esp) = '\0';
+	}
+	/* push null */
+	*esp -= 4;
+	**(uint32_t **)esp = 0;
+	/* push the address of the arguments */
+	for (i=argc-1; i>=0; i--) {
+		*esp -= 4;
+		**(uint32_t **)esp = parsed[i];
+	}
+	/* push upper address */
+	*esp -= 4;
+	**(uint32_t **)esp = (*esp + 4);
+	/* push argc */
+	*esp -= 4;
+	**(uint32_t **)esp = argc;
+	/* push return address */
+	*esp -= 4;
+	**(uint32_t **)esp = 0;
+}
+
 /* Loads an ELF executable from FILE_NAME into the current thread.
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
@@ -215,6 +343,32 @@ load (const char *file_name, void (**eip) (void), void **esp)
   bool success = false;
   int i;
 
+  /*** parse argument ***/
+  //arg_parser(file_name, parsed);
+  char fn_copy[512];
+  char **parsed;
+  char *token, *save;
+  int cnt = 0;
+  
+  if (fn_copy == NULL)
+	return TID_ERROR;
+
+  /* allocate memory */
+  strlcpy(fn_copy, file_name, strlen(file_name) + 1);  
+  for(token = strtok_r(fn_copy, " ", &save); token != NULL;
+		  token = strtok_r(NULL, " ", &save)) {
+	  cnt++;
+  }
+  parsed = (char**)malloc(sizeof(char*) * cnt);
+
+  cnt = 0;
+  strlcpy(fn_copy, file_name, strlen(file_name) + 1);  
+  for(token = strtok_r(fn_copy, " ", &save); token != NULL;
+		  token = strtok_r(NULL, " ", &save)) {
+	parsed[cnt++] = token;
+  }
+  parsed[cnt] = NULL;
+
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL) 
@@ -222,13 +376,13 @@ load (const char *file_name, void (**eip) (void), void **esp)
   process_activate ();
 
   /* Open executable file. */
-  file = filesys_open (file_name);
+  /*** CHANGED 'file_name' to 'parsed[0]' ***/
+  file = filesys_open (parsed[0]);
   if (file == NULL) 
     {
-      printf ("load: %s: open failed\n", file_name);
+      printf ("load: %s: open failed\n", parsed[0]);
       goto done; 
     }
-
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
       || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
@@ -241,7 +395,6 @@ load (const char *file_name, void (**eip) (void), void **esp)
       printf ("load: %s: error loading executable\n", file_name);
       goto done; 
     }
-
   /* Read program headers. */
   file_ofs = ehdr.e_phoff;
   for (i = 0; i < ehdr.e_phnum; i++) 
@@ -300,10 +453,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
           break;
         }
     }
-
+  
   /* Set up stack. */
   if (!setup_stack (esp))
     goto done;
+  
+  /*** put arguments in stack ***/
+  stack_push(parsed, esp); 
+  
+  // TODO free "parsed"
+  //arg_free(parsed);
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
@@ -358,6 +517,7 @@ validate_segment (const struct Elf32_Phdr *phdr, struct file *file)
      it then user code that passed a null pointer to system calls
      could quite likely panic the kernel by way of null pointer
      assertions in memcpy(), etc. */
+  
   if (phdr->p_vaddr < PGSIZE)
     return false;
 
