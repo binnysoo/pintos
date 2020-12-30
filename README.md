@@ -1,4 +1,4 @@
-## ==Pintos Project==
+## < Pintos Project >
 > 2020 Fall
 > Operating Systems (CSE4070)
 
